@@ -1,103 +1,140 @@
 export default {
   async fetch(request, env, ctx) {
-    try {
-      const data = await request.json();
-      const email = data.inputEmail?.toLowerCase() || "";
-      const contactId = data.contactId;
-      const ghlApiKey = data.apiKey;
+    // 🔐 Authorization header check
+    const authHeader = request.headers.get("x-api-key");
+    if (authHeader !== env.HUMANIQ_SECRET) {
+      return new Response(JSON.stringify({ error: "Unauthorized" }), {
+        status: 403,
+        headers: { "Content-Type": "application/json" }
+      });
+    }
 
-      if (!email || !contactId || !ghlApiKey) {
-        return new Response(
-          JSON.stringify({ error: "Missing required parameters." }),
-          { status: 400 }
-        );
+    try {
+      const body = await request.json();
+      const { customData = {} } = body;
+
+      const inputEmail = (customData.inputEmail || body.inputEmail || "").toLowerCase();
+      const contactId = customData.contactId || body.contactId;
+      const ghlApiKey = customData.apiKey || body.apiKey || env.GHL_SUBACCOUNT_API_KEY;
+
+      // 🛑 Basic validation
+      if (!contactId || !ghlApiKey) {
+        return new Response(JSON.stringify({
+          success: false,
+          message: "Missing required fields",
+          debug: body
+        }), {
+          status: 400,
+          headers: { "Content-Type": "application/json" }
+        });
       }
 
-      // --- Core Detection Logic ---
-      const localPart = email.split("@")[0];
-      const domain = email.split("@")[1] || "";
+      if (!inputEmail || inputEmail.trim() === "") {
+        return new Response(JSON.stringify({
+          success: true,
+          message: "No email provided — skipping classification"
+        }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+
+      // --- Detection Logic ---
+      const localPart = inputEmail.split("@")[0];
+      const domain = inputEmail.split("@")[1] || "";
       const entropy = calculateEntropy(localPart);
       const digitRatio = (localPart.replace(/[^0-9]/g, "").length / localPart.length) || 0;
 
       let reasons = [];
       let score = 0;
 
-      // Role-based patterns
-      const roleEmails = ["noreply", "info", "support", "admin", "contact", "webmaster", "postmaster", "newsletter", "mailer", "system"];
+      const roleEmails = [
+        "noreply", "no-reply", "info", "support", "admin", "contact",
+        "webmaster", "postmaster", "newsletter", "mailer", "system", "alert"
+      ];
       if (roleEmails.some(prefix => localPart.startsWith(prefix))) {
         reasons.push("Role-based email");
         score += 30;
       }
 
-      // High entropy detection
       if (entropy > 3.5) {
         reasons.push("High entropy local part");
         score += 25;
       }
 
-      // Numeric-heavy
       if (digitRatio > 0.3) {
         reasons.push("Digit-heavy username");
         score += 15;
       }
 
-      // Known disposable domains
-      const disposableDomains = ["mailinator.com", "tempmail.com", "10minutemail.com", "guerrillamail.com"];
+      const disposableDomains = [
+        "mailinator.com", "tempmail.com", "10minutemail.com",
+        "guerrillamail.com", "yopmail.com"
+      ];
       if (disposableDomains.includes(domain)) {
         reasons.push("Disposable domain");
         score += 30;
       }
 
-      // Length or randomness
       if (localPart.length > 20 || localPart.length < 3) {
-        reasons.push("Suspicious length");
+        reasons.push("Suspicious local part length");
         score += 10;
       }
 
-      // Assign category
+      // --- Classification ---
       let category = "Likely Human";
       if (score >= 81) category = "Very Likely Bot";
       else if (score >= 61) category = "Likely Automated";
       else if (score >= 41) category = "Suspicious";
 
-      // --- Update GHL ---
+      // --- Update GHL Contact Field ---
       const ghlRes = await fetch(`https://rest.gohighlevel.com/v1/contacts/${contactId}`, {
         method: "PATCH",
         headers: {
           Authorization: `Bearer ${ghlApiKey}`,
-          "Content-Type": "application/json",
+          "Content-Type": "application/json"
         },
         body: JSON.stringify({
           customField: [
             {
               key: "contact.email_category",
-              value: category,
-            },
-          ],
-        }),
+              value: category
+            }
+          ]
+        })
       });
 
       const ghlResponse = await ghlRes.json();
 
-      return new Response(
-        JSON.stringify({
-          email,
-          bot_score: score,
-          category,
-          reason_tags: reasons,
-          contactId,
-          ghlUpdated: ghlRes.ok,
-          ghlResponse,
-        }),
-        { status: 200 }
-      );
+      // ✅ Final Response
+      return new Response(JSON.stringify({
+        success: true,
+        email: inputEmail,
+        bot_score: score,
+        category,
+        reason_tags: reasons,
+        contactId,
+        ghlUpdated: ghlRes.ok,
+        ghlResponse
+      }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+
     } catch (err) {
-      return new Response(JSON.stringify({ error: err.message }), { status: 500 });
+      return new Response(JSON.stringify({
+        success: false,
+        message: "Error processing request",
+        error: err.message
+      }), {
+        status: 500,
+        headers: { "Content-Type": "application/json" }
+      });
     }
-  },
+  }
 };
 
-// --- Entropy Calculation Helper ---
+// 🔢 Entropy calculator helper
 function calculateEntropy(str) {
   const map = {};
   for (const char of str) {
