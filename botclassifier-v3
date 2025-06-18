@@ -38,42 +38,76 @@ export default {
         });
       }
 
-      // 🔍 STEP 1: Lookup contact by email to get complete data
+      // 🔍 STEP 1: Get contact data (prioritize contact ID, fallback to email lookup)
       let firstName = "";
       let lastName = "";
       let actualContactId = contactId;
+      let lookupMethod = "none";
 
       try {
-        const lookupResponse = await fetch(`https://rest.gohighlevel.com/v1/contacts/lookup?email=${encodeURIComponent(inputEmail)}`, {
-          method: "GET",
-          headers: {
-            Authorization: `Bearer ${ghlApiKey}`,
-            "Content-Type": "application/json"
-          }
-        });
+        // Method 1: Direct contact fetch by ID (most reliable)
+        if (contactId) {
+          console.log(`🔍 Attempting direct contact fetch by ID: ${contactId}`);
+          const contactResponse = await fetch(`https://rest.gohighlevel.com/v1/contacts/${contactId}`, {
+            method: "GET",
+            headers: {
+              Authorization: `Bearer ${ghlApiKey}`,
+              "Content-Type": "application/json"
+            }
+          });
 
-        if (lookupResponse.ok) {
-          const contactData = await lookupResponse.json();
-          
-          // Extract contact information
-          if (contactData.contact) {
-            firstName = (contactData.contact.firstName || "").trim();
-            lastName = (contactData.contact.lastName || "").trim();
-            actualContactId = contactData.contact.id || contactId;
+          if (contactResponse.ok) {
+            const contactData = await contactResponse.json();
             
-            console.log(`✅ Contact lookup successful: ${firstName} ${lastName} (ID: ${actualContactId})`);
+            if (contactData.contact) {
+              firstName = (contactData.contact.firstName || "").trim();
+              lastName = (contactData.contact.lastName || "").trim();
+              lookupMethod = "contact_id";
+              
+              console.log(`✅ Contact fetch by ID successful: ${firstName} ${lastName}`);
+            } else {
+              console.log(`⚠️ Contact fetch by ID returned no contact data`);
+            }
           } else {
-            console.log(`⚠️ Contact lookup returned no contact data for ${inputEmail}`);
+            console.log(`⚠️ Contact fetch by ID failed: ${contactResponse.status} - ${contactResponse.statusText}`);
           }
-        } else {
-          console.log(`⚠️ Contact lookup failed: ${lookupResponse.status} - ${lookupResponse.statusText}`);
         }
+
+        // Method 2: Email lookup (fallback if contact ID method failed)
+        if (!firstName && !lastName) {
+          console.log(`🔍 Attempting email lookup for: ${inputEmail}`);
+          const lookupResponse = await fetch(`https://rest.gohighlevel.com/v1/contacts/lookup?email=${encodeURIComponent(inputEmail)}`, {
+            method: "GET",
+            headers: {
+              Authorization: `Bearer ${ghlApiKey}`,
+              "Content-Type": "application/json"
+            }
+          });
+
+          if (lookupResponse.ok) {
+            const lookupData = await lookupResponse.json();
+            
+            if (lookupData.contact) {
+              firstName = (lookupData.contact.firstName || "").trim();
+              lastName = (lookupData.contact.lastName || "").trim();
+              actualContactId = lookupData.contact.id || contactId;
+              lookupMethod = "email_lookup";
+              
+              console.log(`✅ Email lookup successful: ${firstName} ${lastName} (ID: ${actualContactId})`);
+            } else {
+              console.log(`⚠️ Email lookup returned no contact data for ${inputEmail}`);
+            }
+          } else {
+            console.log(`⚠️ Email lookup failed: ${lookupResponse.status} - ${lookupResponse.statusText}`);
+          }
+        }
+
       } catch (lookupError) {
         console.log(`⚠️ Contact lookup error: ${lookupError.message}`);
         // Continue with classification even if lookup fails
       }
 
-      // 🔍 STEP 2: Enhanced Detection Logic with complete contact data
+      // 🔍 STEP 2: Enhanced Detection Logic with contact data
       const localPart = inputEmail.split("@")[0];
       const domain = inputEmail.split("@")[1] || "";
       const entropy = calculateEntropy(localPart);
@@ -81,6 +115,8 @@ export default {
 
       let reasons = [];
       let score = 0;
+
+      console.log(`🎯 Starting classification for ${inputEmail} with names: "${firstName}" / "${lastName}"`);
 
       // 1. Role-based emails (enhanced)
       const roleEmails = [
@@ -208,13 +244,19 @@ export default {
         score += 15;
       }
 
-      // 🎯 13. ENHANCED NAME-BASED ANALYSIS (Now with actual contact data!)
+      // 🎯 13. ENHANCED NAME-BASED ANALYSIS (The critical missing piece!)
       if (firstName || lastName) {
+        console.log(`🧑 Running name analysis for: "${firstName}" / "${lastName}"`);
         const nameScore = ultimateAnalyzeNames(firstName, lastName, localPart);
         if (nameScore.score > 0) {
           reasons.push(...nameScore.reasons);
           score += nameScore.score;
+          console.log(`✅ Name analysis added ${nameScore.score} points: ${nameScore.reasons.join(", ")}`);
+        } else {
+          console.log(`ℹ️ No name issues detected`);
         }
+      } else {
+        console.log(`⚠️ No names available for analysis - this will reduce accuracy!`);
       }
 
       // 14. Dot-separated bot patterns
@@ -243,6 +285,8 @@ export default {
       if (score >= 70) category = "Very Likely Bot";
       else if (score >= 50) category = "Likely Automated";
       else if (score >= 30) category = "Suspicious";
+
+      console.log(`🎯 Final classification: ${score} points = "${category}"`);
 
       // 🔍 STEP 3: Update contact with classification (if we have contact ID)
       let ghlRes, ghlResponse, fieldId;
@@ -287,7 +331,8 @@ export default {
         contactLookup: {
           firstName,
           lastName,
-          foundContact: !!(firstName || lastName)
+          foundContact: !!(firstName || lastName),
+          lookupMethod
         },
         debug: {
           entropy: entropy.toFixed(2),
